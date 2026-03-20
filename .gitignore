@@ -1,0 +1,8 @@
+cluster_env/
+fast_env/
+__pycache__/
+.DS_Store
+*.pt
+*.pth
+*.csv
+*.log
