@@ -8,7 +8,7 @@ SAMPLE_PATH = 'full_era_samples_deep.pt'
 DATA_PATH = 'nfl_kicks_1999_2024.csv'
 
 def load_and_sync():
-    print("📂 Loading Posterior Samples and CSV...")
+    print("Loading Posterior Samples and CSV...")
     samples = torch.load(SAMPLE_PATH, map_location='cpu')
     df = pd.read_csv(DATA_PATH)
     
@@ -31,7 +31,7 @@ def build_indices(df):
     return week_to_idx, id_to_idx, k_ids
 
 def run_evaluation(samples, df, week_to_idx, id_to_idx):
-    print("🧠 Extracting Latent Probabilities...")
+    print("Extracting Latent Probabilities...")
     # Extract 'obs_t' keys and compute mean across samples (Variational Mean)
     obs_keys = sorted([k for k in samples.keys() if k.startswith('obs_')], 
                       key=lambda x: int(x.split('_')[1]))
@@ -85,7 +85,7 @@ if __name__ == "__main__":
     acc = accuracy_score(y_true, (y_prob > 0.5))
 
     print("\n" + "="*45)
-    print(f"📊 MODEL CALIBRATION (N={len(y_true)})")
+    print(f"MODEL CALIBRATION (N={len(y_true)})")
     print("-" * 45)
     print(f"Brier Score:  {brier:.4f} (Closer to 0 is better)")
     print(f"AUC-ROC:      {auc:.4f} (Closer to 1 is better)")
