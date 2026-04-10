@@ -4,8 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # 1. LOAD DATA
-print("📂 Loading data and CSV...")
-samples = torch.load('full_era_samples.pt', map_location='cpu')
+print("Loading data and CSV...")
+samples = torch.load('full_era_samples_deep.pt', map_location='cpu')
 df_raw = pd.read_csv('nfl_kicks_1999_2024.csv')
 
 # Standardize IDs and Names
@@ -13,14 +13,14 @@ kicker_ids = sorted(df_raw['kicker_player_id'].unique())
 id_to_name = df_raw.set_index('kicker_player_id')['kicker_player_name'].to_dict()
 
 # 2. DEFINE ACTIVE FILTERS
-print("🔍 Identifying active kickers per era...")
+print("Identifying active kickers per era...")
 # Who kicked in 2024?
 active_2024 = set(df_raw[df_raw['season'] == 2024]['kicker_player_id'].unique())
 # Who kicked between 2020 and 2024?
 active_past_5 = set(df_raw[df_raw['season'] >= 2020]['kicker_player_id'].unique())
 
 # 3. RECONSTRUCT THE TIMELINE
-print("🧩 Reconstructing 550 weeks...")
+print("Reconstructing 550 weeks...")
 z_keys = sorted([k for k in samples.keys() if k.startswith('z_')], 
                 key=lambda x: int(x.split('_')[1]))
 z_list = [samples[k].numpy() if isinstance(samples[k], torch.Tensor) else samples[k] for k in z_keys]
@@ -49,7 +49,7 @@ def generate_and_save(data_subset, filename, label, active_filter=None):
     lb['Power Rating'] = 100 * (lb['Certified Score'] - s_min) / (s_max - s_min)
     
     lb.sort_values('Certified Score', ascending=False).drop(columns=['kicker_id']).to_csv(filename, index=False)
-    print(f"💾 Saved {label} to {filename} ({len(lb)} kickers)")
+    print(f"Saved {label} to {filename} ({len(lb)} kickers)")
 
 # --- FILE 1: CAREER ALL TIME (No filter - The Hall of Fame) ---
 generate_and_save(z_timeline, 'career_all_time.csv', 'All-Time Career')
@@ -76,11 +76,87 @@ def plot_elite_trio(names):
         smoothed = pd.Series(traj).rolling(window=15, min_periods=1).mean()
         plt.plot(smoothed, label=name, linewidth=3)
 
-    plt.title("Bayesian Evolution: The Reliable, The Volatile, and The GOAT", color='white', size=16, pad=20)
+    plt.title("Select Kicker Career Trajectories", color='white', size=16, pad=20)
     plt.legend(facecolor='#222222', labelcolor='white', fontsize=12)
     plt.grid(color='#444444', linestyle='--', alpha=0.3)
     plt.tick_params(colors='white')
     plt.savefig('kicker_comparison.png', facecolor='#121212')
     plt.show()
 
-plot_elite_trio(['A.Vinatieri', 'B.Walsh', 'J.Tucker'])
+# plot_elite_trio(['A.Vinatieri', 'B.Walsh', 'J.Tucker'])
+
+# --- 6. 2024 TOP 3 vs WORST 3 DYNAMIC COMPARISON ---
+def plot_2024_extremes():
+    print("Ranking 2024 kickers to find Top 3 and Bottom 3...")
+    
+    # 1. Isolate 2024 specific timeline indices
+    timeline = df_raw[['season', 'week']].drop_duplicates().sort_values(['season', 'week'])
+    timeline['t_idx'] = range(len(timeline))
+    
+    idx_2024 = timeline[timeline['season'] == 2024]['t_idx'].values
+    weeks_2024 = timeline[timeline['season'] == 2024]['week'].values
+    
+    if len(weeks_2024) == 0:
+        print("No data found for 2024.")
+        return
+
+    # 2. Score all active 2024 kickers
+    kicker_season_stats = []
+    active_2024 = set(df_raw[df_raw['season'] == 2024]['kicker_player_id'].unique())
+    
+    for kid in active_2024:
+        if kid not in kicker_ids: 
+            continue
+            
+        k_idx = kicker_ids.index(kid)
+        
+        # Get their week-to-week trajectory (mean across all 200 Bayesian samples)
+        traj_2024 = np.mean(z_timeline[:, k_idx, idx_2024], axis=0)
+        
+        # Calculate their overall season average to rank them
+        season_avg = np.mean(traj_2024)
+        
+        kicker_season_stats.append({
+            'name': id_to_name.get(kid, kid),
+            'season_avg': season_avg,
+            'trajectory': traj_2024
+        })
+        
+    # 3. Sort by season average (highest to lowest)
+    kicker_season_stats.sort(key=lambda x: x['season_avg'], reverse=True)
+    
+    top_3 = kicker_season_stats[:3]
+    bottom_3 = kicker_season_stats[-3:]
+    
+    # 4. Plot the extremes
+    plt.figure(figsize=(14, 7), facecolor='#121212')
+    ax = plt.gca()
+    ax.set_facecolor('#121212')
+    
+    # Plot Top 3 (Solid lines, circles)
+    for item in top_3:
+        plt.plot(weeks_2024, item['trajectory'], marker='o', linewidth=2.5, markersize=7, 
+                 label=f"TOP: {item['name']} ({item['season_avg']:.2f})")
+                 
+    # Plot Bottom 3 (Dashed lines, X markers)
+    for item in bottom_3:
+        plt.plot(weeks_2024, item['trajectory'], marker='X', linewidth=2, markersize=7, linestyle='--',
+                 label=f"WORST: {item['name']} ({item['season_avg']:.2f})")
+
+    plt.title("2024 Week-to-Week: Top 3 vs Worst 3 Kickers", color='white', size=16, pad=20)
+    plt.xlabel("Week of 2024 Season", color='white', size=12)
+    plt.ylabel("Latent Skill Score (z)", color='white', size=12)
+    
+    plt.xticks(weeks_2024, color='white')
+    plt.yticks(color='white')
+    
+    # Put legend outside the plot so it doesn't cover data
+    plt.legend(facecolor='#222222', labelcolor='white', fontsize=11, bbox_to_anchor=(1.02, 1), loc='upper left')
+    plt.grid(color='#444444', linestyle=':', alpha=0.5)
+    
+    plt.tight_layout() # Ensures the legend isn't cut off
+    plt.savefig('kicker_2024_extremes.png', facecolor='#121212', bbox_inches='tight')
+    plt.show()
+
+# Run it!
+plot_2024_extremes()

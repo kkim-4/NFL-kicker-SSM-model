@@ -7,12 +7,11 @@ import pyro
 import pyro.distributions as dist
 from pyro.nn import PyroModule
 from pyro.infer import SVI, Trace_ELBO, Predictive
-from pyro.optim import ClippedAdam
 from sklearn.preprocessing import StandardScaler
 
 # --- 1. DATA PREPARATION ---
 def prepare_amortized_tensors(file_path):
-    print("📊 Loading and filtering 1999-2024 data...")
+    print("Loading and filtering 1999-2024 data...")
     df = pd.read_csv(file_path)
     # Filter for the full 25-year era
     df = df[(df['season'] >= 1999) & (df['season'] <= 2024)]
@@ -36,7 +35,7 @@ def prepare_amortized_tensors(file_path):
     k_ids = sorted(df['kicker_player_id'].unique())
     max_t = len(timeline)
     
-    print(f"📈 Processing {len(k_ids)} unique kickers across {max_t} weeks.")
+    print(f"Processing {len(k_ids)} unique kickers across {max_t} weeks.")
     
     # Initialize Tensors (Batch x Time x Features)
     X = torch.zeros((len(k_ids), max_t, len(feat_cols)))
@@ -86,15 +85,17 @@ class FGOE_AmortizedSplineSSM(PyroModule):
         # Amortized Encoder (The Scout)
         self.encoder = AmortizedFGOE_Encoder(in_features)
 
-    def model(self, X, y, mask, cs_mask):
+    def model(self, X, y, mask, cs_mask, kl_weight=1.0):
         pyro.module("fgoe", self)
         batch_size, max_t, _ = X.shape
         z_prev = torch.zeros(batch_size).to(X.device)
         
         with pyro.plate("kickers", batch_size):
             for t in range(max_t):
-                # Talent Drift (Spline logic)
-                z_t = pyro.sample(f"z_{t+1}", dist.Normal(z_prev * 0.98, 0.05))
+                # Apply KL Annealing factor to the prior
+                with pyro.poutine.scale(scale=kl_weight):
+                    z_t = pyro.sample(f"z_{t+1}", dist.Normal(z_prev * 0.98, 0.05))
+                
                 # Only active if the kicker has debuted
                 z_t = torch.where(cs_mask[:, t], z_t, torch.zeros_like(z_t))
                 
@@ -103,7 +104,7 @@ class FGOE_AmortizedSplineSSM(PyroModule):
                 pyro.sample(f"obs_{t+1}", dist.Bernoulli(logits=logits).mask(mask[:, t] > 0), obs=y[:, t])
                 z_prev = z_t
 
-    def guide(self, X, y, mask, cs_mask):
+    def guide(self, X, y, mask, cs_mask, kl_weight=1.0):
         pyro.module("encoder", self.encoder)
         batch_size, max_t, feat_dim = X.shape
         weighted_history = torch.zeros(batch_size, feat_dim).to(X.device)
@@ -115,7 +116,10 @@ class FGOE_AmortizedSplineSSM(PyroModule):
                     weighted_history = (active * X[:, t-1, :]) + (weighted_history * self.encoder.decay_rate)
                 
                 mu_q, sigma_q = self.encoder(weighted_history, X[:, t, :], X[:, t, -1:])
-                pyro.sample(f"z_{t+1}", dist.Normal(mu_q, sigma_q))
+                
+                # Apply the same KL Annealing factor to the posterior
+                with pyro.poutine.scale(scale=kl_weight):
+                    pyro.sample(f"z_{t+1}", dist.Normal(mu_q, sigma_q))
 
 # --- 3. EXECUTION ---
 if __name__ == "__main__":
@@ -127,28 +131,47 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
     
-    print(f"🚀 Using device: {device}")
+    print(f"Using device: {device}")
 
-    file_path = 'nfl_kick_attempts(in).csv'
+    # Ensure this matches your data file name
+    file_path = 'nfl_kicks_1999_2024.csv' 
     X, y, mask, cs_mask, k_ids, full_df = prepare_amortized_tensors(file_path)
     X, y, mask, cs_mask = X.to(device), y.to(device), mask.to(device), cs_mask.to(device)
 
     model = FGOE_AmortizedSplineSSM(in_features=X.shape[2]).to(device)
-    optimizer = ClippedAdam({"lr": 0.001, "clip_norm": 10.0})
+    
+    # Exponential Learning Rate Scheduler
+    optimizer_args = {'optimizer': torch.optim.Adam, 
+                      'optim_args': {'lr': 0.005, 'weight_decay': 1e-5},
+                      'gamma': 0.999}
+    optimizer = pyro.optim.ExponentialLR(optimizer_args)
+    
     svi = SVI(model.model, model.guide, optimizer, loss=Trace_ELBO())
 
     pyro.clear_param_store()
-    print("📉 Starting training...")
-    for step in range(2501):
-        loss = svi.step(X, y, mask, cs_mask)
+    print("Starting training with KL Annealing...")
+    
+    n_steps = 2501
+    warmup_steps = 1000 # Take 1000 steps to reach full KL penalty
+    
+    for step in range(n_steps):
+        # Linear KL Annealing schedule
+        kl_weight = min(1.0, 0.01 + (step / warmup_steps))
+        
+        loss = svi.step(X, y, mask, cs_mask, kl_weight=kl_weight)
+        optimizer.step()
+        
         if step % 500 == 0:
-            print(f"Step {step} | Loss: {loss:,.2f}")
+            print(f"Step {step} | Loss: {loss:,.2f} | KL Weight: {kl_weight:.3f}")
 
-    print("💾 Finalizing and saving results...")
-    # Reduced samples slightly to ensure memory safety on long timelines
+    print("Finalizing and saving results...")
+    # Generate predictions (forcing KL weight to 1.0 for valid inference)
     predictive = Predictive(model.model, guide=model.guide, num_samples=50)
-    samples = predictive(X, y, mask, cs_mask)
+    samples = predictive(X, y, mask, cs_mask, kl_weight=1.0)
+    
+    # Store the actual kicker IDs so evaluation scripts never misalign them
+    samples['kicker_ids'] = k_ids 
     
     torch.save(samples, 'full_era_samples.pt')
     torch.save(model.state_dict(), 'fgoe_full_era_model.pth')
-    print("✅ Training complete. 1999-2024 results saved.")
+    print("Training complete. 1999-2024 results saved.")
